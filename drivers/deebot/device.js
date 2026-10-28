@@ -1334,7 +1334,8 @@ class VacuumDevice extends Device {
 				throw new Error('Not connected to the Ecovacs cloud, reconnecting...');
 			}
 			try{
-				return await this.vacbot.runAsync(command, ...args);
+				// Wait longer than the cloud does (~20s) before it answers 500 'Request Timeout', the library default is 10s
+				return await this.vacbot.runAsync(command, ...args, { timeoutMs: 30 * 1000 });
 			}
 			catch(error){
 				if (attempt >= MAX_ATTEMPTS || !this._isTransientError(error)){
@@ -1351,7 +1352,8 @@ class VacuumDevice extends Device {
 		const message = (error && error.message) || '';
 		return /Failure code 50[0234]\b/.test(message) ||
 			/^50[234] /.test(message) ||
-			/ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENOTFOUND|socket hang up/.test(message);
+			/ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENOTFOUND|socket hang up/.test(message) ||
+			/timed out after \d+ms/.test(message);
 	}
 
 	async _park(){
