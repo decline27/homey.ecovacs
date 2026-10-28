@@ -419,7 +419,19 @@ class VacuumDevice extends Device {
 	}
 
 	// Read all states from the vacbot (after connect and reconnect). Maps only after connect, they cause a lot of requests (map set + map info per map).
-	_refreshStates(withMaps) {
+	async _refreshStates(withMaps) {
+		if (!this.vacbot){
+			return;
+		}
+		// A docked robot often sleeps and lets all requests time out (error 500). Wake it with one request (with retries)
+		// and only send the others when it answers. If it doesn't, the robot's own status messages update the states later.
+		try{
+			await this._runCommand('GetBatteryState');
+		}
+		catch(error){
+			this.log('Robot not answering, status refresh skipped (' + error.message + ')');
+			return;
+		}
 		if (!this.vacbot){
 			return;
 		}
@@ -832,6 +844,12 @@ class VacuumDevice extends Device {
 		if (error == undefined || error.code == undefined) return;
 
 		let code = Number(error.code);
+		// A status read (get* command) that timed out is no robot error, it only means the robot didn't answer in time
+		// (e.g. sleeping in the dock). Don't raise the alarm for it. Failed user commands (clean, charge, ...) still do.
+		if (code == 500 && /\(command 'get/i.test(error.error || '')){
+			this.log('Status request timed out: ' + error.error);
+			return;
+		}
 		if (code > 0 && code != 100){
 			// Error codes for real error, 1-99: Auth or request error, >100: Device error
 			this.log('Error ' + code + ': ' + error.error);
