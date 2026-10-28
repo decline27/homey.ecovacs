@@ -65,6 +65,22 @@
                 "de": "Leeren",
                 "nl": "Leegmaken"
             }
+        },
+        {
+            "id": "goEmptying",
+            "title": {
+                "en": "Go to empty",
+                "de": "Zur Entleerung",
+                "nl": "Naar legen"
+            }
+        },
+        {
+            "id": "reCharging",
+            "title": {
+                "en": "Recharging",
+                "de": "Nachladen",
+                "nl": "Opnieuw laden"
+            }
         }
     ]
 }

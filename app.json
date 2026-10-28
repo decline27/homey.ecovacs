@@ -800,6 +800,14 @@
                   "de": "Reinigen",
                   "nl": "Schoonmaak"
                 }
+              },
+              {
+                "id": "mapping",
+                "title": {
+                  "en": "Mapping",
+                  "de": "Kartierung",
+                  "nl": "In kaart brengen"
+                }
               }
             ]
           }
@@ -886,6 +894,22 @@
                   "en": "Emptying",
                   "de": "Leeren",
                   "nl": "Leegmaken"
+                }
+              },
+              {
+                "id": "goEmptying",
+                "title": {
+                  "en": "Go to empty",
+                  "de": "Zur Entleerung",
+                  "nl": "Naar legen"
+                }
+              },
+              {
+                "id": "reCharging",
+                "title": {
+                  "en": "Recharging",
+                  "de": "Nachladen",
+                  "nl": "Opnieuw laden"
                 }
               }
             ]
@@ -2442,6 +2466,14 @@
             "de": "Reinigen",
             "nl": "Schoonmaak"
           }
+        },
+        {
+          "id": "mapping",
+          "title": {
+            "en": "Mapping",
+            "de": "Kartierung",
+            "nl": "In kaart brengen"
+          }
         }
       ]
     },
@@ -2511,6 +2543,22 @@
             "en": "Emptying",
             "de": "Leeren",
             "nl": "Leegmaken"
+          }
+        },
+        {
+          "id": "goEmptying",
+          "title": {
+            "en": "Go to empty",
+            "de": "Zur Entleerung",
+            "nl": "Naar legen"
+          }
+        },
+        {
+          "id": "reCharging",
+          "title": {
+            "en": "Recharging",
+            "de": "Nachladen",
+            "nl": "Opnieuw laden"
           }
         }
       ]

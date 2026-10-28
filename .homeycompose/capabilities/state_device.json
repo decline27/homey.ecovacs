@@ -25,6 +25,14 @@
                 "de": "Reinigen",
                 "nl": "Schoonmaak"
             }
+        },
+        {
+            "id": "mapping",
+            "title": {
+                "en": "Mapping",
+                "de": "Kartierung",
+                "nl": "In kaart brengen"
+            }
         }
     ]
 }

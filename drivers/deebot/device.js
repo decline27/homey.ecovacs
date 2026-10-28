@@ -275,6 +275,7 @@ class VacuumDevice extends Device {
 		}
 
 		await this.setStoreValue('areas', []).catch((error) => { this.error('Error: ' + error); });
+		this._mapsSignature = null;
 		await this.setStoreValue('mapnames', []).catch((error) => { this.error('Error: ' + error); });
 
 		this.log('Deebot ApiVersion : ', this.api.getVersion());
@@ -368,8 +369,9 @@ class VacuumDevice extends Device {
 
 			this.vacbot.on('MapImage ', async (mapImage) => 
 				this.onMapImage(mapImage));
-			this.vacbot.on('MapImageData', async (mapImage) =>  { 
-				this.log('MapImageData: ' + JSON.stringify(mapImage)); });
+			// Don't log the image itself, it's a base64 PNG of several KB that filled the log buffer
+			this.vacbot.on('MapImageData', async (mapImage) =>  {
+				if (appdebug) { this.log('MapImageData: mapID ' + mapImage?.mapID + ', type ' + mapImage?.mapType); } });
 			this.vacbot.on('MapDataReady', async (mapImage) =>  { 
 				this.log('MapDataReady: ' + mapImage); });
 			this.vacbot.on('MapDataObject', async (mapImage) =>  { 
@@ -700,19 +702,26 @@ class VacuumDevice extends Device {
 			if (map['mapIsCurrentMap']) {
 				this.setStoreValue('currentMap', { 'mapID': mapID, 'MapIndex': mapIndex }).catch((error) => { this.error('Error: ' + error); });
 			}
+		}
+		this.setStoreValue('maps', mapnames).catch((error) => { this.error('Error: ' + error); });
+		if (appdebug) { this.log('Maps: ', JSON.stringify(mapnames)); }
 
-			this.setStoreValue('maps', mapnames).catch((error) => { this.error('Error: ' + error); });
-			if (appdebug) { this.log('Maps: ', JSON.stringify(mapnames)); }
+		// The robot pushes the map list often (CachedMapInfo, e.g. during cleaning). Only read the rooms again
+		// if the maps changed, otherwise every push sends a request burst to the robot.
+		const mapsSignature = mapnames.map((map) => map.mapid + ':' + map.name).sort().join('|');
+		if (mapsSignature === this._mapsSignature){
+			return;
+		}
+		this._mapsSignature = mapsSignature;
 
-			this.log('-Updating Floor ' + map['mapName']);
+		for (const map of mapnames) {
+			this.log('-Updating Floor ' + map.name);
 
 			// // Only V1
 			// this.vacbot.run('GetSpotAreas', mapID);
 			// V2 alternative (GetMapSet => GetMapSet_V2)
-			this.vacbot.run('GetMapSet', mapID, 'ar')
-
+			this.vacbot.run('GetMapSet', map.mapid, 'ar')
 		}
-
 	}
 
 	// Only V1
@@ -795,7 +804,7 @@ class VacuumDevice extends Device {
 		// areasPrint.forEach(area => delete area.boundaries);
 		// if (appdebug) { this.log(JSON.stringify(areasPrint)); }
 
-		this.vacbot.run('GetMapInfo', mapset.mid);
+		// No GetMapInfo here: it loads the map image, which is only needed for the 'get map image' flow card (it requests it itself)
 	}
 
 	onMapImage(mapImage){
@@ -825,6 +834,7 @@ class VacuumDevice extends Device {
 		let code = Number(error.code);
 		if (code > 0 && code != 100){
 			// Error codes for real error, 1-99: Auth or request error, >100: Device error
+			this.log('Error ' + code + ': ' + error.error);
 			if (this.hasCapability('error_message')) {
 				this.setCapabilityValue('error_message', error.error).catch((error) => { this.error('Error: ' + error); });
 			}
