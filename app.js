@@ -64,7 +64,7 @@ class Deebot extends Homey.App {
 		this.homey.settings.on('set', (function (dynamicVariableName) {
 			eval(dynamicVariableName + " = this.homey.settings.get(dynamicVariableName)");
 			if (appdebug) { this.log('Settings changed: ' + dynamicVariableName + ' set to ' + this.homey.settings.get(dynamicVariableName)) }
-			if (dynamicVariableName = 'libdebug') {
+			if (dynamicVariableName === 'libdebug') {
 				if (this.homey.settings.get('libdebug')) {
 					process.env.NODE_ENV = 'development'
 				} else {
@@ -109,10 +109,6 @@ class Deebot extends Homey.App {
 
 		this.homey.flow.getActionCard('empty_dustbin').registerRunListener(async (args, state) => {
 			return await args.device.flowActionEmptyDustbin();
-		});
-
-		this.homey.flow.getActionCard('wash_mop_start').registerRunListener(async (args, state) => {
-			return await args.device.flowActionCleanMop();
 		});
 
 		this.homey.flow.getActionCard('wash_mop_start').registerRunListener(async (args, state) => {
