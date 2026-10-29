@@ -911,6 +911,14 @@
                   "de": "Nachladen",
                   "nl": "Opnieuw laden"
                 }
+              },
+              {
+                "id": "goSuperCharging",
+                "title": {
+                  "en": "Go to fast charging",
+                  "de": "Zur Schnellladung",
+                  "nl": "Naar snelladen"
+                }
               }
             ]
           }
@@ -2559,6 +2567,14 @@
             "en": "Recharging",
             "de": "Nachladen",
             "nl": "Opnieuw laden"
+          }
+        },
+        {
+          "id": "goSuperCharging",
+          "title": {
+            "en": "Go to fast charging",
+            "de": "Zur Schnellladung",
+            "nl": "Naar snelladen"
           }
         }
       ]
