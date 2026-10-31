@@ -793,10 +793,16 @@ class VacuumDevice extends Device {
 			return;
 		}
 
+		// After cleaning the robot also pushes other sets for the map (e.g. type 'ct', 'ds'). Only 'ar' holds the rooms.
+		const rooms = mapset['subsets'].filter(subset => subset.type === 'ar');
+		if (rooms.length === 0) {
+			return;
+		}
+
 		let areas = this.getStoreValue('areas');
 		areas = areas.filter(item => item.mapid !== mapset.mid);
 
-		for (const subset of mapset['subsets']) {
+		for (const subset of rooms) {
 			areas.push(
 				{
 					mapid: mapset.mid,
@@ -1152,8 +1158,7 @@ class VacuumDevice extends Device {
 
 	async flowActionCleanZone(zone) {
 		if (appdebug) { this.log('flowActionCleanZone(' + zone + ')'); }
-		await this._runCommand('SpotArea', zone.id.zoneid, 1);
-		// await this.vacbot.run('FreeCLean', '1,' + zone.id.zoneid, 1);
+		await this._cleanAreas([zone.id.zoneid]);
 	}
 
 	async flowActionCleanZones(args) {
@@ -1165,10 +1170,20 @@ class VacuumDevice extends Device {
 			args.zone04?.id.zoneid,
 			args.zone05?.id.zoneid
 		]
-		.filter(id => id != null)
-		.join(',');
-		await this._runCommand('SpotArea', zones, 1);
-		// await this.vacbot.run('FreeCLean', '1,' + zone.id.zoneid, 1);
+		.filter(id => id != null);
+		await this._cleanAreas(zones);
+	}
+
+	async _cleanAreas(areaIds) {
+		let result;
+		if (this.vacbot?.deviceClass === 'twunby'){
+			// The T90 accepts clean_V2 with type spotArea but stays idle
+			result = await this._runCommand('FreeClean', areaIds.map(id => '1,' + id).join(';'));
+		}
+		else{
+			result = await this._runCommand('SpotArea', areaIds.join(','), 1);
+		}
+		if (appdebug) { this.log('_cleanAreas(' + areaIds + '): ' + JSON.stringify(result)); }
 	}
 
 	async flowActionSetCleanSpeed(value) {
@@ -1270,6 +1285,7 @@ class VacuumDevice extends Device {
 	// FLOW AUTOCOMPLETE
 	// =======================================================================================================================================================================================	
 	getAutocompleteZoneList(onlyCurrentMap=false){
+		this._refreshRooms();
 		let areas = this.getStoreValue('areas');
 		let maps = this.getStoreValue('maps');
 
@@ -1280,7 +1296,7 @@ class VacuumDevice extends Device {
 					if (onlyCurrentMap && !map.mapIsCurrentMap) { continue; }
 					list.push(
 						{
-							"name": map.name + ' - ' + area.name,
+							"name": map.name + ' - ' + (area.name || 'Room ' + area.zoneid),
 							"id": {
 								"id": area.mapid + '-' + area.zoneid,
 								"mapid": area.mapid,
@@ -1368,6 +1384,14 @@ class VacuumDevice extends Device {
 	_getMaps(){
 		if (appdebug) { this.log('_getMaps()'); } 
 		this.vacbot.run('GetMaps', true);
+	}
+
+	_refreshRooms(){
+		// Rooms can change in the Ecovacs app without an event. Read them again when they are being picked.
+		if (!this.vacbot || Date.now() - (this._roomsReadAt ?? 0) < 60 * 1000){ return; }
+		this._roomsReadAt = Date.now();
+		this._mapsSignature = null;
+		this._getMaps();
 	}
 
 	//////////////////////////////////////////// Utilities ///////////////////////////////////////
