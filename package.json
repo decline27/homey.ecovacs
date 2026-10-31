@@ -1,4 +1,7 @@
 {
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
   "dependencies": {
     "axios": "file:./lib/axios/axios-1.16.1.tgz",
     "chalk": "^6.0.0",
