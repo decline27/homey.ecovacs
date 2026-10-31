@@ -94,7 +94,8 @@
                 "length": 6
             },
             "navigation": {
-                "prev": "account"
+                "prev": "account",
+                "next": "list_devices"
             }
         },
         {

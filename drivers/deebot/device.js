@@ -51,12 +51,19 @@ class VacuumDevice extends Device {
 		if (this._stopped){
 			return;
 		}
+		const generation = this._connectGeneration = (this._connectGeneration || 0) + 1;
 		try{
-			await this.initApi();
-			this._reconnectDelay = 0;
+			await this.initApi(generation);
+			if (!this._isCurrentConnect(generation)){
+				return;
+			}
+			this._connectedAt = Date.now();
 			await this.setAvailable().catch(this.error);
 		}
 		catch(error){
+			if (!this._isCurrentConnect(generation)){
+				return;
+			}
 			this.error('Error: error.message ', error);
 			await this.setUnavailable(error.message).catch(this.error);
 			// 2FA verification needs the user to repair the device, retrying won't help
@@ -66,10 +73,23 @@ class VacuumDevice extends Device {
 		}
 	}
 
+	// False when the device was deleted or a newer connect started while this one was waiting for the cloud
+	_isCurrentConnect(generation) {
+		return !this._stopped && generation === this._connectGeneration;
+	}
+
 	_scheduleReconnect() {
+		// Several failing commands can report the same disconnect, one pending reconnect is enough
 		if (this._reconnectTimer){
-			this.homey.clearTimeout(this._reconnectTimer);
+			return;
 		}
+		// A login that works is no proof the session works. Only start the backoff over when the session lasted a while,
+		// otherwise a rejected token causes a password login every minute.
+		const STABLE_AFTER = 10 * 60 * 1000; // 10min
+		if (this._connectedAt && Date.now() - this._connectedAt > STABLE_AFTER){
+			this._reconnectDelay = 0;
+		}
+		this._connectedAt = null;
 		const MAX_RECONNECT_DELAY = 30 * 60 * 1000; // 30min
 		this._reconnectDelay = Math.min((this._reconnectDelay || 30 * 1000) * 2, MAX_RECONNECT_DELAY);
 		this.log('Reconnecting in ' + Math.round(this._reconnectDelay / 1000) + 's');
@@ -97,13 +117,21 @@ class VacuumDevice extends Device {
 		let tokenExpiresAt = this.api.getTokenExpiry();
 		this.log('tokenExpiresAt: ' + tokenExpiresAt);
 
-		const MAX_DELAY = 23 * 60 * 60 * 1000; // 23h
-		const delay = Math.max(Math.min(tokenExpiresAt - Date.now(), MAX_DELAY), 0);
+		// A password login can make Ecovacs ask for 2FA again, so only log in when the token is about to expire
+		const REFRESH_BEFORE_EXPIRY = 24 * 60 * 60 * 1000; // 24h
+		const MAX_DELAY = 7 * 24 * 60 * 60 * 1000; // 7d, setTimeout can't handle very long delays
+		const MIN_DELAY = 30 * 60 * 1000; // 30min, never a login loop if a new token is valid only shortly
+		const remaining = tokenExpiresAt - Date.now() - REFRESH_BEFORE_EXPIRY;
+		const delay = Number.isFinite(remaining) ? Math.max(Math.min(remaining, MAX_DELAY), MIN_DELAY) : MIN_DELAY;
 
 		if (this._refreshTimer){
 			this.homey.clearTimeout(this._refreshTimer);
 		}
 		this._refreshTimer = this.homey.setTimeout(async () => {
+			if (this.api.getTokenExpiry() - Date.now() > REFRESH_BEFORE_EXPIRY){
+				this._scheduleTokenRefresh();
+				return;
+			}
 			this.log('Token refresh timer expired, Refreshing token...');
 			try{
 				await this.api.connect( this.getStoreValue('email'), ecovacsApi.getPasswordHash(this.getStoreValue('password')) );
@@ -202,7 +230,7 @@ class VacuumDevice extends Device {
 	// API
 	// =======================================================================================================================================================================================	
 
-	async initApi() {
+	async initApi(generation) {
 		this.log('Vacuum has been added');
 
 		// let data = this.getData();
@@ -213,12 +241,19 @@ class VacuumDevice extends Device {
 
 		let vacuum = null;
 		try{
-			this.api = await ecovacsApi.getApi(this.getStoreValue('deviceId'), this.getStoreValue('country'));
+			const api = await ecovacsApi.getApi(this.getStoreValue('deviceId'), this.getStoreValue('country'));
+			if (!this._isCurrentConnect(generation)){
+				return;
+			}
+			this.api = api;
 			await this.setStoreValue('country', this.api.country).catch(this.error);
 
 			// Variant using the auth token to login
 			// store auth token if changed
 			this.api.on('credentialsUpdated', (data) => {
+				if (api !== this.api){
+					return;
+				}
 				this.log('credentialsUpdated');
 				this.setStoreValue('api', {
 					uid: this.api.uid,
@@ -236,25 +271,36 @@ class VacuumDevice extends Device {
 			});
 			// try to use auth token. A password login on every start/reconnect can make Ecovacs ask for 2FA device verification again.
 			// The device list request checks the token and returns the current device data (resource) at the same time.
-			const api = this.getStoreValue('api');
+			const stored = this.getStoreValue('api');
 			const MIN_VALIDITY = 60 * 60 * 1000; // 1h
-			if (api && api.uid && api.user_access_token && api.tokenExpiresAt > Date.now() + MIN_VALIDITY){
-				this.api.uid = api.uid;
-				this.api.user_access_token = api.user_access_token;
-				this.api.tokenExpiresAt = api.tokenExpiresAt;
+			if (stored && stored.uid && stored.user_access_token && stored.tokenExpiresAt > Date.now() + MIN_VALIDITY){
+				this.api.uid = stored.uid;
+				this.api.user_access_token = stored.user_access_token;
+				this.api.tokenExpiresAt = stored.tokenExpiresAt;
 				try{
 					vacuum = await this._getVacuum();
 					this.log('Using stored token');
 					this._scheduleTokenRefresh();
 				}
 				catch(error){
+					// No answer says nothing about the token. Try again later instead of a password login.
+					if (this._isTransientError(error)){
+						throw error;
+					}
 					this.log('Stored token not valid (' + error.message + ')');
 				}
+			}
+			if (!this._isCurrentConnect(generation)){
+				return;
 			}
 			if (!vacuum){
 				this.log('connect with user/password');
 				await this.api.connect( this.getStoreValue('email'), ecovacsApi.getPasswordHash(this.getStoreValue('password')) );
 				vacuum = await this._getVacuum();
+			}
+			if (!this._isCurrentConnect(generation)){
+				api.removeAllListeners('credentialsUpdated');
+				return;
 			}
 
 			// Variant using the user/password
@@ -274,9 +320,8 @@ class VacuumDevice extends Device {
 			}
 		}
 
-		await this.setStoreValue('areas', []).catch((error) => { this.error('Error: ' + error); });
+		// The stored rooms stay until the robot sends new ones, a sleeping robot doesn't answer right after connecting
 		this._mapsSignature = null;
-		await this.setStoreValue('mapnames', []).catch((error) => { this.error('Error: ' + error); });
 
 		this.log('Deebot ApiVersion : ', this.api.getVersion());
 		const vacbot = this.api.getVacBot(this.api.uid, ecovacsApi.getConstant('REALM'), this.api.resource, this.api.user_access_token, vacuum, this.getStoreValue('geo'));
@@ -339,7 +384,6 @@ class VacuumDevice extends Device {
 			// });
 			this.vacbot.on('BatteryInfo', (battery) => this.onBatteryInfo(battery));
 			this.vacbot.on('ChargeState', (state) => this.onChargeState(state));
-			this.vacbot.on('DeebotPosition', (values) => this.onDebotPosition(position));
 			this.vacbot.on('CleanSpeed', (level) => this.onCleanSpeed(level));
 			this.vacbot.on('WaterLevel', (level) => this.onWaterLevel(level));
 			this.vacbot.on('WaterInfo', (level) => this.onWaterInfo(level));
@@ -353,7 +397,6 @@ class VacuumDevice extends Device {
 			this.vacbot.on('LastError', async (error) => await this.onLastError(error));
 
 			this.vacbot.on('WaterBoxScrubbingType', async (mode) => { this.log('WaterBoxScrubbingType: ' + mode); });
-			this.vacbot.on('MoppingSystemInfo ', async (state) => this.log('MoppingSystemInfo: ' + state));
 
 			if (!this.vacbot.is950type_V2()) {
 				this.vacbot.on('CleanReport', (cleanReport) => this.onCleanReport(cleanReport));
@@ -367,8 +410,6 @@ class VacuumDevice extends Device {
 
 			
 
-			this.vacbot.on('MapImage ', async (mapImage) => 
-				this.onMapImage(mapImage));
 			// Don't log the image itself, it's a base64 PNG of several KB that filled the log buffer
 			this.vacbot.on('MapImageData', async (mapImage) =>  {
 				if (appdebug) { this.log('MapImageData: mapID ' + mapImage?.mapID + ', type ' + mapImage?.mapType); } });
@@ -435,13 +476,10 @@ class VacuumDevice extends Device {
 		if (!this.vacbot){
 			return;
 		}
-		if (appdebug) { this.log('vacbot.run(GetWaterBoxInfo)'); } this.vacbot.run('GetWaterBoxInfo');
 		if (appdebug) { this.log('vacbot.run(GetCleanCount)'); } this.vacbot.run('GetCleanCount');
 		if (appdebug) { this.log('vacbot.run(GetCleanSpeed)'); } this.vacbot.run('GetCleanSpeed');
-		if (appdebug) { this.log('vacbot.run(GetWaterLevel)'); } this.vacbot.run('GetWaterLevel');
 		if (appdebug) { this.log('vacbot.run(GetWaterInfo)'); } this.vacbot.run('GetWaterInfo');
 		if (appdebug) { this.log('vacbot.run(GetAutoEmpty)'); } this.vacbot.run('GetAutoEmpty');
-		if (appdebug) { this.log('vacbot.run(GetBatteryState)'); } this.vacbot.run('GetBatteryState');
 		if (appdebug) { this.log('vacbot.run(GetCleanState)'); } this.vacbot.run('GetCleanState');
 		if (appdebug) { this.log('vacbot.run(GetPosition)'); } this.vacbot.run('GetPosition');
 		if (appdebug) { this.log('vacbot.run(GetStats)'); } this.vacbot.run('GetStats');
@@ -450,7 +488,7 @@ class VacuumDevice extends Device {
 		if (appdebug) { this.log('vacbot.run(GetWorkMode)'); } this.vacbot.run('GetWorkMode');
 		if (appdebug) { this.log('vacbot.run(GetSweepMode)'); } this.vacbot.run('GetSweepMode');
 		if (appdebug) { this.log('vacbot.run(GetError)'); } this.vacbot.run('GetError');
-		if (withMaps) {
+		if (withMaps || (this.getStoreValue('maps') ?? []).length === 0) {
 			if (appdebug) { this.log('vacbot.run(GetMaps)'); } this._getMaps();
 		}
 	}
@@ -504,7 +542,7 @@ class VacuumDevice extends Device {
 		}
 
 		// cleaning finished?
-		if (lastRobotState != CONSTANTS.WORKMODE_ROBOT_IDLE &&
+		if (lastRobotState && lastRobotState != CONSTANTS.WORKMODE_ROBOT_IDLE &&
 			workState.robot == CONSTANTS.WORKMODE_ROBOT_IDLE ) {
 			this.onCleaningComplete();
 		}
@@ -555,11 +593,6 @@ class VacuumDevice extends Device {
 		this.setCapabilityValue('clean_count_mode.display', cleanCount.toString()).catch((error) => { this.error('Error: ' + error); });
 	}
 
-	onDebotPosition(position){
-		if (appdebug) { this.log('vacbot.on(DeebotPosition, ' + JSON.stringify(position) + ')'); }
-		this.setStoreValue('currentPosition', position).catch((error) => { this.log('Error: ' + error); });
-	}
-
 	onBatteryInfo(battery){
 		if (appdebug) { this.log('vacbot.on(BatteryInfo, ' + JSON.stringify(battery) + ')'); }
 		this.setCapabilityValue('measure_battery', Math.round(battery)).catch((error) => { this.log('Error: ' + error); });
@@ -592,15 +625,8 @@ class VacuumDevice extends Device {
 		}
 		if (appdebug) { this.log('vacbot.on(WaterLevel, ' + level.toString() + ')'); }
 
-		let levelValue;
-		if (typeof level === 'string') {
-			levelValue = parseInt(level);
-		}
-		if (typeof level === 'number') {
-			levelValue = level.toString();
-		}	
-		this.setCapabilityValue('water_flow_level', levelValue).catch((error) => { this.error('Error: ' + error); });
-		this.setCapabilityValue('water_flow_level.display', level).catch((error) => { this.error('Error: ' + error); });
+		this.setCapabilityValue('water_flow_level', level.toString()).catch((error) => { this.error('Error: ' + error); });
+		this.setCapabilityValue('water_flow_level.display', level.toString()).catch((error) => { this.error('Error: ' + error); });
 		// map to int value
 		switch (level) {
 			case 1:
@@ -782,7 +808,7 @@ class VacuumDevice extends Device {
 		}
 		catch (error) {
 			this.log('Error: ' + error.message);
-			throw new Error(error.message + ' (onMapSpotAreaInfo): ' + JSON.stringify(mapSpotAreaInfo));
+			throw new Error(error.message + ' (onMapSpotAreaInfo): ' + JSON.stringify(area));
 		}
 	}
 
@@ -799,7 +825,7 @@ class VacuumDevice extends Device {
 			return;
 		}
 
-		let areas = this.getStoreValue('areas');
+		let areas = this.getStoreValue('areas') ?? [];
 		areas = areas.filter(item => item.mapid !== mapset.mid);
 
 		for (const subset of rooms) {
@@ -814,8 +840,8 @@ class VacuumDevice extends Device {
 					// boundaries: this.convertBoundaries(area.mapSpotAreaBoundaries),
 				}
 			);
-			this.setStoreValue('areas', areas).catch((error) => { this.error('Error: ' + error); });
 		}
+		this.setStoreValue('areas', areas).catch((error) => { this.error('Error: ' + error); });
 		if (appdebug) { this.log(JSON.stringify(areas)); }
 		// var areasPrint = areas;
 		// areasPrint.forEach(area => delete area.toto);
@@ -823,11 +849,6 @@ class VacuumDevice extends Device {
 		// if (appdebug) { this.log(JSON.stringify(areasPrint)); }
 
 		// No GetMapInfo here: it loads the map image, which is only needed for the 'get map image' flow card (it requests it itself)
-	}
-
-	onMapImage(mapImage){
-		if (appdebug) { this.log('vacbot.on(MapImage, ' + JSON.stringify(mapImage) + ')'); }
-
 	}
 
 	async onErrorCode(error) {
@@ -845,6 +866,24 @@ class VacuumDevice extends Device {
 
 	}
 
+	_raiseError(code, message) {
+		this.log('Error ' + code + ': ' + message);
+		if (this.hasCapability('error_message')) {
+			this.setCapabilityValue('error_message', message).catch((error) => { this.error('Error: ' + error); });
+		}
+		if (this.hasCapability('error_code')) {
+			this.setCapabilityValue('error_code', code).catch((error) => { this.error('Error: ' + error); });
+		}
+		if (this.hasCapability('alarm_error')) {
+			this.setCapabilityValue('alarm_error', true).catch((error) => { this.error('Error: ' + error); });
+		}
+		const flowTriggerError = this.homey.flow.getDeviceTriggerCard('error');
+		flowTriggerError.trigger(this, {
+			error_id: code,
+			error_message: message,
+		}, null).catch((error) => { this.log('Error: ' + error)});
+	}
+
 	async onLastError(error) {
 		if (appdebug) { this.log('vacbot.on(LastError, ' + JSON.stringify(error) + ')'); }
 		if (error == undefined || error.code == undefined) return;
@@ -856,23 +895,14 @@ class VacuumDevice extends Device {
 			this.log('Status request timed out: ' + error.error);
 			return;
 		}
+		// _runCommand retries this and raises the error itself if the last attempt fails too
+		if (code == 500 && this._commandsRunning > 0){
+			this.log('Command timed out: ' + error.error);
+			return;
+		}
 		if (code > 0 && code != 100){
 			// Error codes for real error, 1-99: Auth or request error, >100: Device error
-			this.log('Error ' + code + ': ' + error.error);
-			if (this.hasCapability('error_message')) {
-				this.setCapabilityValue('error_message', error.error).catch((error) => { this.error('Error: ' + error); });
-			}
-			if (this.hasCapability('error_code')) {
-				this.setCapabilityValue('error_code', code).catch((error) => { this.error('Error: ' + error); });
-			}
-			if (this.hasCapability('alarm_error')) {
-				this.setCapabilityValue('alarm_error', true).catch((error) => { this.error('Error: ' + error); });
-			}
-			const flowTriggerError = this.homey.flow.getDeviceTriggerCard('error');
-			flowTriggerError.trigger(this, {
-				error_id: code,
-				error_message: error.error,
-			}, null).catch((error) => { this.log('Error: ' + error)});		
+			this._raiseError(code, error.error);
 		}
 		else if (code === 0 || code === 100) {
 			// No error: 0 and 100 = "NoError: Robot is operational"
@@ -1158,23 +1188,37 @@ class VacuumDevice extends Device {
 
 	async flowActionCleanZone(zone) {
 		if (appdebug) { this.log('flowActionCleanZone(' + zone + ')'); }
-		await this._cleanAreas([zone.id.zoneid]);
+		await this._cleanAreas([zone.id]);
 	}
 
 	async flowActionCleanZones(args) {
 		if (appdebug) { this.log('flowActionCleanZonea(' + args + ')'); }
 		const zones = [
-			args.zone01?.id.zoneid,
-			args.zone02?.id.zoneid,
-			args.zone03?.id.zoneid,
-			args.zone04?.id.zoneid,
-			args.zone05?.id.zoneid
+			args.zone01?.id,
+			args.zone02?.id,
+			args.zone03?.id,
+			args.zone04?.id,
+			args.zone05?.id
 		]
 		.filter(id => id != null);
 		await this._cleanAreas(zones);
 	}
 
-	async _cleanAreas(areaIds) {
+	// Room ids are only unique per map, the robot would clean the room with the same id on the active map
+	_checkZone(zone) {
+		const currentMap = (this.getStoreValue('maps') ?? []).find((map) => map.mapIsCurrentMap);
+		if (currentMap && currentMap.mapid != zone.mapid){
+			throw new Error('This room is on another map, the active map is ' + currentMap.name);
+		}
+		const rooms = (this.getStoreValue('areas') ?? []).filter((area) => area.mapid == zone.mapid);
+		if (rooms.length > 0 && !rooms.some((area) => area.zoneid == zone.zoneid)){
+			throw new Error('This room no longer exists on the map, select it again in the flow card');
+		}
+	}
+
+	async _cleanAreas(zones) {
+		zones.forEach((zone) => this._checkZone(zone));
+		const areaIds = zones.map((zone) => zone.zoneid);
 		let result;
 		if (this.vacbot?.deviceClass === 'twunby'){
 			// The T90 accepts clean_V2 with type spotArea but stays idle
@@ -1270,7 +1314,7 @@ class VacuumDevice extends Device {
 	// FLOW CONDITIONS
 	// =======================================================================================================================================================================================	
 	isMapActive(map) {
-		this.maps = this.getStoreValue('maps');
+		this.maps = this.getStoreValue('maps') ?? [];
 		for (const m of this.maps) {
 			if (m.mapid == map.id) {
 				return m.mapIsCurrentMap;
@@ -1286,8 +1330,8 @@ class VacuumDevice extends Device {
 	// =======================================================================================================================================================================================	
 	getAutocompleteZoneList(onlyCurrentMap=false){
 		this._refreshRooms();
-		let areas = this.getStoreValue('areas');
-		let maps = this.getStoreValue('maps');
+		let areas = this.getStoreValue('areas') ?? [];
+		let maps = this.getStoreValue('maps') ?? [];
 
 		let list = [];
 		for (const map of maps) {
@@ -1311,7 +1355,7 @@ class VacuumDevice extends Device {
 	}
 
 	getAutocompleteMapList(){
-		let maps = this.getStoreValue('maps');
+		let maps = this.getStoreValue('maps') ?? [];
 		let list = [];
 		for (const map of maps) {
 			list.push(
@@ -1345,22 +1389,33 @@ class VacuumDevice extends Device {
 	// happens regularly, e.g. when the robot is docked and its WiFi is sleeping.
 	async _runCommand(command, ...args) {
 		const MAX_ATTEMPTS = 3;
-		for (let attempt = 1; ; attempt++){
-			if (!this.vacbot){
-				throw new Error('Not connected to the Ecovacs cloud, reconnecting...');
-			}
-			try{
-				// Wait longer than the cloud does (~20s) before it answers 500 'Request Timeout', the library default is 10s
-				return await this.vacbot.runAsync(command, ...args, { timeoutMs: 30 * 1000 });
-			}
-			catch(error){
-				if (attempt >= MAX_ATTEMPTS || !this._isTransientError(error)){
-					this.error('Command ' + command + ' failed: ' + error.message);
-					throw error;
+		this._commandsRunning = (this._commandsRunning || 0) + 1;
+		try{
+			for (let attempt = 1; ; attempt++){
+				if (!this.vacbot){
+					throw new Error('Not connected to the Ecovacs cloud, reconnecting...');
 				}
-				this.log('Command ' + command + ' failed (' + error.message + '), retry ' + attempt + '/' + (MAX_ATTEMPTS - 1));
-				await new Promise((resolve) => this.homey.setTimeout(resolve, attempt * 3000));
+				try{
+					// Wait longer than the cloud does (~20s) before it answers 500 'Request Timeout', the library default is 10s
+					return await this.vacbot.runAsync(command, ...args, { timeoutMs: 30 * 1000 });
+				}
+				catch(error){
+					const transient = this._isTransientError(error);
+					if (attempt >= MAX_ATTEMPTS || !transient){
+						this.error('Command ' + command + ' failed: ' + error.message);
+						// Only now it's an error for the user. A status read that fails is not, see onLastError.
+						if (transient && !/^get/i.test(command)){
+							this._raiseError(Number((/Failure code (\d+)/.exec(error.message) || [])[1]) || 500, 'Command ' + command + ' failed: ' + error.message);
+						}
+						throw error;
+					}
+					this.log('Command ' + command + ' failed (' + error.message + '), retry ' + attempt + '/' + (MAX_ATTEMPTS - 1));
+					await new Promise((resolve) => this.homey.setTimeout(resolve, attempt * 3000));
+				}
 			}
+		}
+		finally{
+			this._commandsRunning--;
 		}
 	}
 
